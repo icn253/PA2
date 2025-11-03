@@ -59,6 +59,8 @@ string getPrompt() {
 
 int main() {
     string prevDir; // store previous directory for 'cd -'
+    signal(SIGCHLD, SIG_IGN);  // Auto-clean background processes
+
 
     for (;;) {
         cout << GREEN << getPrompt() << YELLOW << "Shell$ " << NC;
