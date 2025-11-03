@@ -33,184 +33,166 @@ string getPrompt() {
     // Get current working directory
     char cwd[PATH_MAX];
     if (!getcwd(cwd, sizeof(cwd))) {
-        perror("getcwd");
+        // don't print perror here in normal operation; fallback path
         strcpy(cwd, "?");
     }
 
-    // Get current date/time
+    // Use time + strftime to guarantee leading zero on day
     time_t now = time(nullptr);
-    char* timeStr = ctime(&now); // e.g., "Sun Nov  2 22:16:34 2025\n"
+    struct tm *tm_info = localtime(&now);
+    char timeBuf[32];
+    // Format exactly "Nov 02 18:31:46"
+    strftime(timeBuf, sizeof(timeBuf), "%b %d %H:%M:%S", tm_info);
 
-    // ctime() string format: "Www Mmm dd hh:mm:ss yyyy\n"
-    // We only need "Mmm dd hh:mm:ss"
-    string timeString(timeStr);
-    if (!timeString.empty() && timeString.back() == '\n') {
-        timeString.pop_back(); // remove newline
-    }
-
-    // Extract substring (skip weekday and year)
-    // Positions: "Sun " (4 chars) → start at index 4, length 15 for "Nov  2 22:16:34"
-    string formattedTime = timeString.substr(4, 15);
-
-    // Combine into Gradescope-style prompt
-    string prompt = formattedTime + " " + user + ":" + cwd + "$ ";
+    string prompt = string(timeBuf) + " " + user + ":" + cwd + "$ ";
     return prompt;
 }
 
+
 int main() {
-    string prevDir; // store previous directory for 'cd -'
-    signal(SIGCHLD, SIG_IGN);  // Auto-clean background processes
+    string prevDir; // for cd -
+    signal(SIGCHLD, SIG_IGN); // auto-clean background processes
 
-
-    for (;;) {
-        cout << GREEN << getPrompt() << YELLOW << "Shell$ " << NC;
+    while (true) {
+        cout << getPrompt(); // print prompt only once per loop
 
         string input;
         if (!getline(cin, input)) {
             cout << endl;
-            break; // EOF received
+            break; // EOF or Ctrl+D
         }
 
-        if (input.empty()) continue; // ignore empty input
+        if (input.empty()) continue;
+
         if (input == "exit") {
-            cout << RED << "Now exiting shell..." << endl << "Goodbye" << NC << endl;
+            cout << "Now exiting shell...\nGoodbye\n";
             break;
         }
 
-        Tokenizer tknr(input); 
-        if (tknr.hasError() || tknr.commands.empty()) continue; // skip on error or no commands
+        Tokenizer tokenizer(input);
+        if (tokenizer.hasError() || tokenizer.commands.empty())
+            continue;
 
-        int numCmds = (int)tknr.commands.size();
+        int numCmds = tokenizer.commands.size();
 
-        // Handle built-in 'cd' if it's a single command with 'cd'
-        if (numCmds == 1) { 
-            Command* only = tknr.commands[0]; 
-            if (!only->args.empty() && only->args[0] == "cd") {
+        // ----- Handle built-in cd -----
+        if (numCmds == 1) {
+            Command* cmd = tokenizer.commands[0];
+            if (!cmd->args.empty() && cmd->args[0] == "cd") {
                 char cwdBuf[PATH_MAX];
                 getcwd(cwdBuf, sizeof(cwdBuf));
                 string currentDir(cwdBuf);
 
-                if (only->args.size() > 1 && only->args[1] == "-") {
+                if (cmd->args.size() > 1 && cmd->args[1] == "-") {
                     if (!prevDir.empty()) {
-                        if (chdir(prevDir.c_str()) != 0) perror("cd failed");
-                        else cout << prevDir << endl;
+                        if (chdir(prevDir.c_str()) != 0)
+                            perror("cd failed");
+                        else
+                            cout << prevDir << endl;
                     }
                 } else {
-                    const char* path = only->args.size() > 1 ? only->args[1].c_str() : getenv("HOME");
-                    if (chdir(path) != 0) perror("cd failed");
-                    else prevDir = currentDir;
+                    const char* path = (cmd->args.size() > 1)
+                        ? cmd->args[1].c_str()
+                        : getenv("HOME");
+                    if (chdir(path) != 0)
+                        perror("cd failed");
+                    else
+                        prevDir = currentDir;
                 }
                 continue;
             }
         }
 
-        // Set up pipes
+        // ----- Set up pipes -----
         vector<int> pipes;
         if (numCmds > 1) pipes.resize(2 * (numCmds - 1));
         for (int i = 0; i < numCmds - 1; ++i) {
-            if (pipe(&pipes[2*i]) < 0) {
+            if (pipe(&pipes[2 * i]) < 0) {
                 perror("pipe");
-                
-                for (int j = 0; j < 2*i; ++j){
-                    if (pipes[j] != 0) close(pipes[j]);
-                }
-                pipes.clear();
-                break;
+                exit(1);
             }
         }
 
-        // Store child pids
         vector<pid_t> pids;
-        pids.reserve(numCmds);
 
-        // Fork and execute each command
+        // ----- Fork and execute each command -----
         for (int i = 0; i < numCmds; ++i) {
-            Command* cmd = tknr.commands[i];
-            if (cmd->args.empty()) {
-                continue;
-            }
+            Command* cmd = tokenizer.commands[i];
+            if (cmd->args.empty()) continue;
 
-            // Prepare argv for execvp
+            // Build argv for execvp
             vector<char*> argv;
-            for (auto &arg : cmd->args) argv.push_back((char*)arg.c_str());
+            for (auto &arg : cmd->args)
+                argv.push_back((char*)arg.c_str());
             argv.push_back(nullptr);
 
             pid_t pid = fork();
             if (pid < 0) {
-                perror("fork");
+                perror("fork failed");
                 continue;
             }
 
-            if (pid == 0) { // CHILD process
-                // Set up pipes for stdin/stdout
-                if (!pipes.empty()) {
-                    // If not first command, set stdin to previous pipe read end
-                    if (i > 0) {
-                        int read_end = pipes[2*(i-1)];
-                        dup2(read_end, STDIN_FILENO);
-                    }
-                    // If not last command, set stdout to this pipe write end
-                    if (i < numCmds - 1) {
-                        int write_end = pipes[2*i + 1];
-                        dup2(write_end, STDOUT_FILENO);
-                    }
-
-                    // Close all pipe fds (file descriptors )in child
-                    for (int fd : pipes) {
-                        close(fd);
-                    }
+            if (pid == 0) { // CHILD
+                // ----- Pipe connections -----
+                if (i > 0) { // not first command → get input from previous pipe
+                    dup2(pipes[2 * (i - 1)], STDIN_FILENO);
+                }
+                if (i < numCmds - 1) { // not last command → output to next pipe
+                    dup2(pipes[2 * i + 1], STDOUT_FILENO);
                 }
 
-                // Handle input redirection
+                // Close all pipes in child
+                for (int fd : pipes) close(fd);
+
+                // ----- Input redirection -----
                 if (cmd->hasInput()) {
                     int fd_in = open(cmd->in_file.c_str(), O_RDONLY);
-                    if (fd_in < 0) { perror("open input"); exit(1); }
+                    if (fd_in < 0) {
+                        perror("input redirection failed");
+                        exit(1);
+                    }
                     dup2(fd_in, STDIN_FILENO);
                     close(fd_in);
                 }
 
-                // Handle output redirection
+                // ----- Output redirection -----
                 if (cmd->hasOutput()) {
-                    int fd_out = open(cmd->out_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                    if (fd_out < 0) { perror("open output"); exit(1); }
+                    int fd_out = open(cmd->out_file.c_str(),
+                                      O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                    if (fd_out < 0) {
+                        perror("output redirection failed");
+                        exit(1);
+                    }
                     dup2(fd_out, STDOUT_FILENO);
                     close(fd_out);
                 }
 
-                // Execute command
                 execvp(argv[0], argv.data());
-                // If execvp returns, it failed
                 perror("execvp failed");
                 _exit(1);
             } else {
-                // PARENT process
-                pids.push_back(pid); 
+                // PARENT
+                pids.push_back(pid);
             }
         }
 
-        // Close all pipe fds in parent
-        for (int fd : pipes) {
-            if (fd != 0) close(fd);
-        }
+        // Close all pipe file descriptors in parent
+        for (int fd : pipes) close(fd);
 
-        // Check if last command is background
+        // ----- Check background -----
         bool background = false;
-        if (!tknr.commands.empty()) {
-            Command* last = tknr.commands.back();
+        if (!tokenizer.commands.empty()) {
+            Command* last = tokenizer.commands.back();
             background = last->isBackground();
         }
 
-
-        if (background) {
-            for (pid_t background_pid : pids) {
-                cout << "Process running in background: " << background_pid << endl;
-            }
-        } else {
-            for (pid_t child : pids) {
-                int status;
-                waitpid(child, &status, 0); // wait for each child at very end
-            }
+        // ----- Wait for processes -----
+        if (!background) {
+            for (pid_t pid : pids)
+                waitpid(pid, nullptr, 0);
         }
+        // if background: do nothing (children are reaped by SIGCHLD handler)
+
     }
 
     return 0;
