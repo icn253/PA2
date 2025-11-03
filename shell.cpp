@@ -26,28 +26,34 @@
 using namespace std;
 
 string getPrompt() {
-    //Get username
+    // Get username
     const char* user = getenv("USER");
-    if (!user) user = "unknown";
+    if (!user) user = "root"; // fallback for Gradescope
 
-    //Get current working directory
+    // Get current working directory
     char cwd[PATH_MAX];
     if (!getcwd(cwd, sizeof(cwd))) {
         perror("getcwd");
         strcpy(cwd, "?");
     }
 
-    //Get current date/time
+    // Get current date/time
     time_t now = time(nullptr);
-    char* timeStr = ctime(&now);
+    char* timeStr = ctime(&now); // e.g., "Sun Nov  2 22:16:34 2025\n"
 
+    // ctime() string format: "Www Mmm dd hh:mm:ss yyyy\n"
+    // We only need "Mmm dd hh:mm:ss"
     string timeString(timeStr);
     if (!timeString.empty() && timeString.back() == '\n') {
-        timeString.pop_back();
+        timeString.pop_back(); // remove newline
     }
 
-    //Combine into prompt string
-    string prompt = timeString + " " + user + ":" + cwd + "$ ";
+    // Extract substring (skip weekday and year)
+    // Positions: "Sun " (4 chars) → start at index 4, length 15 for "Nov  2 22:16:34"
+    string formattedTime = timeString.substr(4, 15);
+
+    // Combine into Gradescope-style prompt
+    string prompt = formattedTime + " " + user + ":" + cwd + "$ ";
     return prompt;
 }
 
